@@ -1,0 +1,46 @@
+{
+  "name": "agyscope",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "tap": "node --import tsx server/tap.ts",
+    "probe": "node --import tsx server/probe.ts",
+    "format": "prettier --write src shared server tests scripts",
+    "dev": "node --import tsx server/index.ts",
+    "build": "tsc --noEmit && vite build --emptyOutDir false",
+    "start": "node --import tsx server/index.ts --production",
+    "demo": "node --import tsx scripts/synthetic-demo.ts",
+    "service": "node --import tsx server/service.ts",
+    "menubar": "node --import tsx server/menu-bar.ts",
+    "test:macos": "node --import tsx scripts/test-macos.ts",
+    "doctor": "node --import tsx server/doctor.ts"
+  },
+  "dependencies": {
+    "lucide-react": "0.468.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "tsx": "4.20.6"
+  },
+  "devDependencies": {
+    "@types/jsdom": "21.1.7",
+    "@types/node": "22.15.30",
+    "@types/react": "19.2.0",
+    "@types/react-dom": "19.2.0",
+    "jsdom": "26.1.0",
+    "prettier": "3.6.2",
+    "typescript": "5.9.3",
+    "vite": "8.3.4"
+  },
+  "license": "MIT",
+  "description": "A private, local usage observatory and macOS menu bar meter for Google Antigravity.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DicksonKam/agyscope.git"
+  }
+}
