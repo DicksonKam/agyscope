@@ -26,10 +26,11 @@ export function HistoryChart({
   }
 
   const width = 760;
-  const height = 210;
-  const pad = { top: 18, right: 16, bottom: 30, left: 38 };
+  const height = 220;
+  const pad = { top: 20, right: 16, bottom: 30, left: 38 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
+  const baseY = pad.top + plotH;
 
   const minT = points[0].at;
   const maxT = Math.max(points[points.length - 1].at, minT + 60_000);
@@ -40,28 +41,45 @@ export function HistoryChart({
     pad.top + plotH - (Math.max(0, Math.min(100, rem)) / 100) * plotH;
 
   const solidSegments: string[] = [];
+  const areaSegments: string[] = [];
   const gapSegments: string[] = [];
-  let currentPath = `M ${x(points[0].at).toFixed(1)} ${y(points[0].remaining).toFixed(1)}`;
+
+  let segStartX = x(points[0].at);
+  let segLastX = segStartX;
+  let currentPath = `M ${segStartX.toFixed(1)} ${y(points[0].remaining).toFixed(1)}`;
+
+  const flushSegment = () => {
+    solidSegments.push(currentPath);
+    if (segLastX - segStartX > 0.5) {
+      areaSegments.push(
+        `${currentPath} L ${segLastX.toFixed(1)} ${baseY.toFixed(1)} L ${segStartX.toFixed(1)} ${baseY.toFixed(1)} Z`,
+      );
+    }
+  };
 
   for (let i = 1; i < points.length; i++) {
     const prev = points[i - 1];
     const curr = points[i];
-    const px = x(curr.at).toFixed(1);
-    const py = y(curr.remaining).toFixed(1);
+    const cx = x(curr.at);
+    const cy = y(curr.remaining);
     if (historyBoundary(prev, curr)) {
-      solidSegments.push(currentPath);
+      flushSegment();
       gapSegments.push(
-        `M ${x(prev.at).toFixed(1)} ${y(prev.remaining).toFixed(1)} L ${px} ${py}`,
+        `M ${x(prev.at).toFixed(1)} ${y(prev.remaining).toFixed(1)} L ${cx.toFixed(1)} ${cy.toFixed(1)}`,
       );
-      currentPath = `M ${px} ${py}`;
+      segStartX = cx;
+      segLastX = cx;
+      currentPath = `M ${cx.toFixed(1)} ${cy.toFixed(1)}`;
     } else {
-      currentPath += ` L ${px} ${py}`;
+      currentPath += ` L ${cx.toFixed(1)} ${cy.toFixed(1)}`;
+      segLastX = cx;
     }
   }
-  solidSegments.push(currentPath);
+  flushSegment();
 
   const ticksX = [minT, minT + (maxT - minT) / 2, maxT];
   const active = hovered !== null ? points[hovered] : null;
+  const lastPoint = points[points.length - 1];
 
   return (
     <div className="chart">
@@ -86,12 +104,32 @@ export function HistoryChart({
         }}
       >
         <defs>
-          <linearGradient id={`${uid}-line`} x1="0" y1="0" x2={width} y2="0" gradientUnits="userSpaceOnUse">
+          <linearGradient
+            id={`${uid}-line`}
+            x1="0"
+            y1="0"
+            x2={width}
+            y2="0"
+            gradientUnits="userSpaceOnUse"
+          >
             <stop offset="0%" stopColor="#60a5fa" />
-            <stop offset="55%" stopColor="#a78bfa" />
+            <stop offset="52%" stopColor="#a78bfa" />
             <stop offset="100%" stopColor="#34d399" />
           </linearGradient>
+          <linearGradient
+            id={`${uid}-area`}
+            x1="0"
+            y1={pad.top}
+            x2="0"
+            y2={baseY}
+            gradientUnits="userSpaceOnUse"
+          >
+            <stop offset="0%" stopColor="#818cf8" stopOpacity="0.22" />
+            <stop offset="65%" stopColor="#60a5fa" stopOpacity="0.06" />
+            <stop offset="100%" stopColor="#34d399" stopOpacity="0" />
+          </linearGradient>
         </defs>
+
         {[0, 25, 50, 75, 100].map((v) => (
           <g key={v}>
             <line
@@ -106,7 +144,7 @@ export function HistoryChart({
             </text>
           </g>
         ))}
-        <text x={pad.left} y={11} className="axis-title">
+        <text x={pad.left} y={12} className="axis-title">
           % remaining
         </text>
         {ticksX.map((t, i) => (
@@ -118,6 +156,10 @@ export function HistoryChart({
           >
             {shortSpan ? shortTime(t, timezone) : shortDate(t, timezone)}
           </text>
+        ))}
+
+        {areaSegments.map((d, i) => (
+          <path key={`a-${i}`} d={d} fill={`url(#${uid}-area)`} />
         ))}
         {gapSegments.map((d, i) => (
           <path key={`g-${i}`} d={d} className="gap-line" />
@@ -136,17 +178,35 @@ export function HistoryChart({
               key={i}
               cx={x(p.at)}
               cy={y(p.remaining)}
-              r={hovered === i ? 4.5 : 2.3}
+              r={hovered === i ? 4.5 : 2.2}
               className="data-dot"
             />
           ))}
+        {/* Luminous terminal beacon on the latest recorded point */}
+        {!active && (
+          <g>
+            <circle
+              cx={x(lastPoint.at)}
+              cy={y(lastPoint.remaining)}
+              r={7.5}
+              fill="#34d399"
+              fillOpacity="0.18"
+            />
+            <circle
+              cx={x(lastPoint.at)}
+              cy={y(lastPoint.remaining)}
+              r={3.5}
+              fill="#34d399"
+            />
+          </g>
+        )}
         {active && (
           <g>
             <line
               x1={x(active.at)}
               x2={x(active.at)}
               y1={pad.top}
-              y2={height - pad.bottom}
+              y2={baseY}
               className="hover-rule"
             />
             <circle

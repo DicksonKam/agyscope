@@ -76,7 +76,7 @@ export function MonitoringHealth({
           </strong>
         </div>
         <div>
-          <span>Antigravity CLI (`agy`)</span>
+          <span>Antigravity CLI (agy)</span>
           <strong>
             {demo
               ? "Synthetic demo"

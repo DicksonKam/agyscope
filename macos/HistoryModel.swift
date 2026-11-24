@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-func panelFrame(anchor: CGRect, visible: CGRect, preferred: CGSize = CGSize(width: 440, height: 600)) -> CGRect {
+func panelFrame(anchor: CGRect, visible: CGRect, preferred: CGSize = CGSize(width: 440, height: 645)) -> CGRect {
     let inset = min(8, min(visible.width, visible.height) / 4)
     let safe = visible.insetBy(dx: inset, dy: inset)
     let size = CGSize(width: min(preferred.width, safe.width), height: min(preferred.height, safe.height))

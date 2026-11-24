@@ -1,6 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { identityFactory } from "../server/privacy.ts";
 import { Store } from "../server/store.ts";
 import type { ActivityEvent, Observation } from "../shared/types.ts";
 
@@ -13,6 +14,7 @@ const root = resolve(import.meta.dirname, "..");
 const demoDir = join(root, ".local", "demo-data");
 rmSync(demoDir, { recursive: true, force: true });
 mkdirSync(demoDir, { recursive: true, mode: 0o700 });
+identityFactory(demoDir);
 
 const store = new Store(join(demoDir, "agyscope.sqlite"));
 const now = Date.now();
@@ -20,16 +22,17 @@ const reset5h = Math.round((now + 2.25 * 3600_000) / 60_000) * 60;
 const reset7d = Math.round((now + 3.4 * 86_400_000) / 60_000) * 60;
 
 const obs: Observation[] = [];
-// 24 hours of synthetic 5-hour & weekly readings with one reset and one sleep gap
-for (let i = 48; i >= 0; i--) {
-  const at = now - i * 1800_000;
-  if (i >= 28 && i <= 32) continue; // simulated sleep gap
-  const prevCycle = i > 6;
+// 10 hours of synthetic 5-hour & weekly readings at 10-minute intervals (inside readingGapMs)
+// with one genuine 90-minute sleep gap and one clean 5-hour reset.
+for (let i = 60; i >= 0; i--) {
+  const at = now - i * 600_000;
+  if (i >= 34 && i <= 42) continue; // simulated 90-minute sleep gap
+  const prevCycle = i > 16;
   const used5h = prevCycle
-    ? Math.min(92, Math.max(4, Math.round((48 - i) * 2.1)))
-    : Math.min(26, Math.max(2, Math.round((6 - i) * 3.1)));
+    ? Math.min(84, Math.max(6, Math.round(6 + (60 - i) * 1.75)))
+    : Math.min(24, Math.max(2, Math.round(2 + (16 - i) * 1.15)));
   const r5 = prevCycle ? reset5h - 5 * 3600 : reset5h;
-  const used7d = Math.min(40, Math.max(12, Math.round(14 + (48 - i) * 0.46)));
+  const used7d = Math.min(38, Math.max(18, Math.round(18 + (60 - i) * 0.3)));
 
   obs.push(
     {
@@ -64,12 +67,12 @@ for (let i = 48; i >= 0; i--) {
     },
     {
       account: "demo-account",
-      bucket: "gemini_pro",
-      slot: "five_hour",
+      bucket: "gemini_argon",
+      slot: "seven_day",
       at,
-      used: used5h,
-      reset: r5,
-      duration: 300,
+      used: Math.max(2, Math.round(used7d * 0.2)),
+      reset: reset7d,
+      duration: 10080,
       source: "demo",
       session: null,
       version: "2.0.0-demo",
@@ -79,10 +82,10 @@ for (let i = 48; i >= 0; i--) {
     },
     {
       account: "demo-account",
-      bucket: "gemini_flash",
+      bucket: "third_party",
       slot: "five_hour",
       at,
-      used: Math.max(1, Math.round(used5h * 0.25)),
+      used: Math.max(4, Math.round(used5h * 0.4)),
       reset: r5,
       duration: 300,
       source: "demo",
@@ -153,6 +156,15 @@ for (let i = 0; i < 42; i++) {
 store.transaction(() => {
   for (const o of obs) store.observe(o);
   for (const e of events) store.recordEvent(e);
+  store.set("scan", {
+    at: now - 12_000,
+    files: 18,
+    changed: 3,
+    bytes: 482_000,
+    elapsedMs: 28,
+    failed: 0,
+    complete: true,
+  });
   store.attempt({
     at: now,
     ok: true,

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useId } from "react";
 import type { DashboardState } from "../shared/api";
 import type { Observation } from "../shared/types";
 import {
@@ -14,6 +14,47 @@ import { date, elapsed, resetCountdown } from "./time";
 
 function fmtPct(v: number) {
   return Number.isInteger(v) ? String(v) : v.toFixed(1);
+}
+
+/** Sculpted radial gauge wrapping the Living Antigravity silhouette for the Hero 5h card. */
+function LivingOrb({
+  percent,
+  tint,
+}: {
+  percent: number;
+  tint?: string;
+}) {
+  const uid = useId();
+  const clamped = Math.max(0, Math.min(100, percent));
+  const r = 46;
+  const circ = 2 * Math.PI * r;
+  const dash = circ * (clamped / 100);
+
+  return (
+    <div className="hero-orb" aria-hidden="true">
+      <svg viewBox="0 0 112 112" className="orb-ring">
+        <defs>
+          <linearGradient id={`${uid}-ring`} x1="0" y1="0" x2="112" y2="112" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stopColor="#60a5fa" />
+            <stop offset="50%" stopColor="#a78bfa" />
+            <stop offset="100%" stopColor="#34d399" />
+          </linearGradient>
+        </defs>
+        <circle cx="56" cy="56" r={r} className="orb-track" />
+        <circle
+          cx="56"
+          cy="56"
+          r={r}
+          className="orb-progress"
+          stroke={tint ?? `url(#${uid}-ring)`}
+          strokeDasharray={`${dash.toFixed(1)} ${circ.toFixed(1)}`}
+        />
+      </svg>
+      <div className="orb-core">
+        <AgyMark size={40} fillPercent={clamped} prism={!tint} tint={tint} />
+      </div>
+    </div>
+  );
 }
 
 export function QuotaRunway({
@@ -52,8 +93,14 @@ export function QuotaRunway({
 
   const rem5 = fiveHour ? remainingPercent(fiveHour.used) : null;
   const remWk = weekly ? remainingPercent(weekly.used) : null;
-  const expired5 = fiveHour?.reset !== null && fiveHour?.reset !== undefined && fiveHour.reset * 1000 <= now;
-  const expiredWk = weekly?.reset !== null && weekly?.reset !== undefined && weekly.reset * 1000 <= now;
+  const expired5 =
+    fiveHour?.reset !== null &&
+    fiveHour?.reset !== undefined &&
+    fiveHour.reset * 1000 <= now;
+  const expiredWk =
+    weekly?.reset !== null &&
+    weekly?.reset !== undefined &&
+    weekly.reset * 1000 <= now;
   const live5 = !!fiveHour && !unreachable && now - fiveHour.at <= liveMs;
   const stale5 = expired5 || (activitySince && !live5);
 
@@ -70,6 +117,12 @@ export function QuotaRunway({
       : low5
         ? "#fbbf24"
         : undefined;
+
+  const otherPools = windows.filter(
+    (w) =>
+      (!fiveHour || windowKey(w) !== windowKey(fiveHour)) &&
+      (!weekly || windowKey(w) !== windowKey(weekly)),
+  );
 
   const historyReady =
     !!data.query &&
@@ -104,7 +157,7 @@ export function QuotaRunway({
         </section>
       ) : (
         <section className="runway-grid" aria-label="Primary Antigravity limits">
-          {/* Hero 5-Hour Rolling Window */}
+          {/* Hero 5-Hour Rolling Window with Living Antigravity Radial Orb */}
           <article
             className={`card hero-card${stale5 ? " is-stale" : ""}${
               weeklyCapped
@@ -117,14 +170,10 @@ export function QuotaRunway({
             }`}
             onClick={() => fiveHour && onSelectWindow(windowKey(fiveHour))}
           >
+            <div className="hero-ambient" aria-hidden="true" />
             <div className="card-top">
               <div className="eyebrow-row">
-                <AgyMark
-                  size={20}
-                  fillPercent={rem5 ?? 0}
-                  prism={!heroTint}
-                  tint={heroTint}
-                />
+                <span className="status-dot" />
                 <span className="overline">5-HOUR ROLLING WINDOW</span>
               </div>
               <span className="pill-chip">
@@ -137,44 +186,49 @@ export function QuotaRunway({
                       : data.demo
                         ? "Synthetic demo"
                         : fiveHour?.source === "cli"
-                          ? "Antigravity CLI"
+                          ? "Antigravity CLI · 0 tokens"
                           : "StatusLine tap"}
               </span>
             </div>
 
-            <div className="hero-metric">
-              <strong className="hero-number">
-                {rem5 !== null ? fmtPct(rem5) : "—"}
-                <span>%</span>
-              </strong>
-              <div className="hero-meta">
-                <span>
-                  {expired5
-                    ? "remaining before reset"
-                    : weeklyCapped
-                      ? "refills paused until weekly rollover"
-                      : creditsActive
-                        ? "base quota used · drawing AI Credits"
-                        : "remaining in this 5h window"}
-                </span>
-                {fiveHour && (
-                  <small>
-                    {live5
-                      ? `Live · ${elapsed(fiveHour.at, now)}`
-                      : `Observed · ${elapsed(fiveHour.at, now)}`}
-                  </small>
-                )}
-              </div>
-            </div>
+            <div className="hero-split">
+              <div className="hero-left">
+                <div className="hero-metric">
+                  <strong className="hero-number">
+                    {rem5 !== null ? fmtPct(rem5) : "—"}
+                    <span>%</span>
+                  </strong>
+                  <div className="hero-meta">
+                    <span>
+                      {expired5
+                        ? "remaining before reset"
+                        : weeklyCapped
+                          ? "refills paused until weekly rollover"
+                          : creditsActive
+                            ? "base quota used · drawing AI Credits"
+                            : "remaining in this 5h window"}
+                    </span>
+                    {fiveHour && (
+                      <small>
+                        {live5
+                          ? `Live · ${elapsed(fiveHour.at, now)}`
+                          : `Observed · ${elapsed(fiveHour.at, now)}`}
+                      </small>
+                    )}
+                  </div>
+                </div>
 
-            <div className="meter-track hero-track">
-              <div
-                className={`meter-fill${heroTint ? "" : " prism-fill"}`}
-                style={{
-                  width: `${rem5 ?? 0}%`,
-                  ...(heroTint ? { background: heroTint } : {}),
-                }}
-              />
+                <div className="meter-track hero-track">
+                  <div
+                    className={`meter-fill${heroTint ? "" : " prism-fill"}`}
+                    style={{
+                      width: `${rem5 ?? 0}%`,
+                      ...(heroTint ? { background: heroTint } : {}),
+                    }}
+                  />
+                </div>
+              </div>
+              <LivingOrb percent={rem5 ?? 0} tint={heroTint} />
             </div>
 
             <div className="card-footer">
@@ -248,7 +302,9 @@ export function QuotaRunway({
 
             <div className="card-footer">
               <strong>
-                {weekly ? resetCountdown(weekly.reset, now) : "Awaiting reading"}
+                {weekly
+                  ? resetCountdown(weekly.reset, now)
+                  : "Awaiting reading"}
               </strong>
               {weekly?.reset !== null && weekly?.reset !== undefined && (
                 <time dateTime={new Date(weekly.reset * 1000).toISOString()}>
@@ -260,8 +316,40 @@ export function QuotaRunway({
         </section>
       )}
 
+      {/* Secondary Model Pools At-a-Glance */}
+      {otherPools.length > 0 && (
+        <section className="mini-pool-row" aria-label="Additional Antigravity pools">
+          {otherPools.map((w) => {
+            const rem = remainingPercent(w.used);
+            const key = windowKey(w);
+            const isSelected = selected && windowKey(selected) === key;
+            return (
+              <button
+                key={key}
+                className={`mini-pool-card${isSelected ? " is-selected" : ""}`}
+                onClick={() => onSelectWindow(key)}
+              >
+                <div className="mini-pool-top">
+                  <span>{windowLabel(w)}</span>
+                  <strong>{fmtPct(rem)}%</strong>
+                </div>
+                <div className="meter-track mini-track">
+                  <div
+                    className="meter-fill prism-fill"
+                    style={{ width: `${rem}%` }}
+                  />
+                </div>
+              </button>
+            );
+          })}
+        </section>
+      )}
+
       {/* Compact This 5h Window Activity Banner (mirrors Mission Control popover) */}
-      <section className="card pulse-strip" aria-label="This 5-hour window activity">
+      <section
+        className="card pulse-strip"
+        aria-label="This 5-hour window activity"
+      >
         <div className="pulse-label">
           <span className="status-dot" />
           <strong>This 5h window</strong>

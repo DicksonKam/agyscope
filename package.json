@@ -18,6 +18,7 @@
     "demo": "node --import tsx scripts/synthetic-demo.ts",
     "service": "node --import tsx server/service.ts",
     "menubar": "node --import tsx server/menu-bar.ts",
+    "snapshot:menubar": "node --import tsx scripts/snapshot-menu-bar.ts",
     "test:macos": "node --import tsx scripts/test-macos.ts",
     "doctor": "node --import tsx server/doctor.ts"
   },
