@@ -39,7 +39,7 @@ const identity = () => accountIdentity(config, hash);
 
 const cliReader = new CliUsageReader(
   store,
-  cliCommand(config.agy, config.appSupport),
+  cliCommand(config.agy, config.appSupport, config.dataDir),
   config.agy,
   () => identity().account,
   () =>
@@ -47,11 +47,14 @@ const cliReader = new CliUsageReader(
     (store.get<boolean>("cliReadsEnabled") ?? config.cliReads.enabled),
 );
 
+let nextCycleManual = false;
 async function collect(): Promise<boolean> {
   if (config.demo) return true;
+  const manual = nextCycleManual;
+  nextCycleManual = false;
   const result = await collectOnce(config, store, hash);
   lastTapLines = result.tap?.lines ?? 0;
-  await cliReader.read();
+  await cliReader.read(Date.now(), manual);
   const now = Date.now();
   if (!firstCycle && (result.transcripts?.changed ?? 0) > 0)
     store.set("lastActivityAt", now);
@@ -212,6 +215,7 @@ const server = createServer(async (req, res) => {
         return json(res, 200, statusSnapshot());
       }
       if (req.method === "POST" && url.pathname === "/api/refresh") {
+        nextCycleManual = true;
         await collector.cycle(true);
         return json(res, 200, statusSnapshot());
       }
@@ -222,6 +226,7 @@ const server = createServer(async (req, res) => {
             error: "Choose whether Antigravity CLI reads run.",
           });
         store.set("cliReadsEnabled", b.enabled);
+        if (b.enabled) cliReader.resetPause();
         return json(res, 200, statusSnapshot());
       }
       return json(res, 404, { error: "Unknown operation" });

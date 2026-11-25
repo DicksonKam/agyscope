@@ -1,4 +1,8 @@
 import { spawn } from "node:child_process";
+import { lookup } from "node:dns/promises";
+import { accessSync, constants, existsSync, readFileSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import type { CliReads, CliReadState } from "../shared/api.ts";
 import type { Observation } from "../shared/types.ts";
 import { slotRank } from "../shared/allowance.ts";
@@ -9,10 +13,85 @@ import type { Store } from "./store.ts";
 /**
  * Official Antigravity CLI (`agy`) zero-token usage reader.
  * AGYScope never reads, stores, or renews Google credentials and never contacts Google endpoints directly.
- * If the CLI ever reports model tokens or cost for a usage check, reads immediately stop by themselves.
+ *
+ * Root-level anti-popup & safety invariants (independent of failure cause — DNS, expired token,
+ * locked Keychain, VPN, firewall, or server error):
+ * 1. Pre-flight DNS check skips spawning `agy` altogether while offline or DNS is broken.
+ * 2. Spawns `agy` by resolved absolute path with a stripped environment (`PATH=""`, `NO_BROWSER=1`,
+ *    `BROWSER=""`, `CI=true`, `NONINTERACTIVE=1`) so PATH-resolved browser launchers (`open`) cannot run.
+ * 3. Preemptive 8-second silent-auth watchdog on an ephemeral `--log-file`: if `agy` logs
+ *    `trying silent auth` and has not logged `silent auth succeeded` within 8s, AGYScope terminates it
+ *    2 seconds BEFORE `agy`'s 10s `keyringAuth` timeout can fall back to interactive OAuth.
+ * 4. Immediate OAuth killswitch + persistent circuit breaker (`cliAuthPaused` in SQLite): any
+ *    `silent auth failed` / `triggering interactive OAuth` or 3 consecutive non-offline failures pause
+ *    background CLI polling completely until the user explicitly clicks Refresh or re-enables CLI checks.
+ * 5. Zero-token guard: if `agy` ever spends tokens or cost answering `/usage`, reads stop permanently.
  */
-export function usageArguments(): string[] {
-  return ["-p", "/usage", "--output-format", "json", "--print-timeout", "25s"];
+export function usageArguments(logFile?: string): string[] {
+  const args: string[] = [];
+  if (logFile) args.push("--log-file", logFile);
+  args.push("-p", "/usage", "--output-format", "json", "--print-timeout", "20s");
+  return args;
+}
+
+/** Resolve an executable name to an absolute path so we can spawn it safely with `PATH=""`. */
+export function resolveExecutable(
+  executable: string,
+  envPath = process.env.PATH ?? "",
+  home = homedir(),
+): string {
+  if (isAbsolute(executable) || executable.includes("/")) return executable;
+  const searchDirs = [
+    ...envPath.split(":").filter(Boolean),
+    join(home, ".local/bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+  ];
+  for (const dir of [...new Set(searchDirs)]) {
+    const candidate = join(dir, executable);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      /* Continue searching. */
+    }
+  }
+  return executable;
+}
+
+/** Stripped headless environment for `agy`: keeps user home/tmp for keyring IPC, removes PATH & browser hooks. */
+export function headlessChildEnv(
+  base: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    PATH: "",
+    NO_BROWSER: "1",
+    BROWSER: "",
+    CI: "true",
+    NONINTERACTIVE: "1",
+  };
+  for (const key of [
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "all_proxy",
+    "no_proxy",
+  ]) {
+    if (base[key] !== undefined) env[key] = base[key];
+  }
+  return env;
 }
 
 export interface CliUsageReading {
@@ -87,11 +166,7 @@ export function parseCliUsageReport(
     const cmd = m.command as
       | { name?: unknown; data?: { groups?: unknown } }
       | undefined;
-    if (
-      cmd &&
-      typeof cmd === "object" &&
-      Array.isArray(cmd.data?.groups)
-    ) {
+    if (cmd && typeof cmd === "object" && Array.isArray(cmd.data?.groups)) {
       reading.available = true;
       for (const group of cmd.data.groups as Record<string, unknown>[]) {
         if (!group || !Array.isArray(group.buckets)) continue;
@@ -184,42 +259,171 @@ export function cliObservations(
   });
 }
 
-export type CliCommand = () => Promise<{
+export interface CliCommandResult {
   code: number | null;
   stdout: string;
   stderr: string;
-}>;
+  authTriggered?: boolean;
+  silentAuthTimedOut?: boolean;
+  networkError?: boolean;
+}
+
+export type CliCommand = () => Promise<CliCommandResult>;
+export type NetworkPreflight = () => Promise<boolean>;
+
+const tryingSilentAuthPattern = /trying silent auth/i;
+const silentAuthSucceededPattern = /silent auth succeeded/i;
+const interactiveOAuthPattern =
+  /triggering interactive oauth|starting oauth authentication flow|consumeroauth: starting oauth flow|silent auth failed/i;
+const networkErrorPattern =
+  /i\/o timeout|no such host|dial tcp|enotfound|eai_again|network is unreachable|connection refused|keyringauth: timed out/i;
+const signedOutPattern =
+  /not logged in|not signed in|please sign in|authenticate|login required|unauthenticated|triggering interactive oauth/i;
+
+/** Lightweight DNS pre-flight check so AGYScope never spawns `agy` while DNS or network is down. */
+export async function defaultNetworkPreflight(
+  timeoutMs = 2500,
+): Promise<boolean> {
+  const resolveWithTimeout = (host: string) =>
+    new Promise<boolean>((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve(false);
+        }
+      }, timeoutMs);
+      timer.unref();
+      lookup(host)
+        .then(() => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(true);
+          }
+        })
+        .catch(() => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve(false);
+          }
+        });
+    });
+  const [a, b] = await Promise.all([
+    resolveWithTimeout("antigravity.google"),
+    resolveWithTimeout("oauth2.googleapis.com"),
+  ]);
+  return a && b;
+}
 
 export function cliCommand(
   executable: string,
   cwd: string,
-  timeoutMs = 30_000,
+  logDir = cwd,
+  timeoutMs = 22_000,
+  silentAuthDeadlineMs = 8_000,
 ): CliCommand {
   return () =>
     new Promise((resolve, reject) => {
-      const child = spawn(executable, usageArguments(), {
+      const resolvedBin = resolveExecutable(executable);
+      const logFile = join(logDir, "agy-usage-last.log");
+      try {
+        if (existsSync(logFile)) unlinkSync(logFile);
+      } catch {
+        /* Ignore stale temp log cleanup errors. */
+      }
+
+      const child = spawn(resolvedBin, usageArguments(logFile), {
         cwd,
         stdio: ["ignore", "pipe", "pipe"],
+        env: headlessChildEnv(),
       });
       let stdout = "";
       let stderr = "";
+      let authTriggered = false;
+      let silentAuthTimedOut = false;
+      let networkError = false;
+      let killed = false;
+      let silentAuthStartedAt: number | null = null;
+
+      const terminateChild = () => {
+        if (killed) return;
+        killed = true;
+        child.kill("SIGTERM");
+        setTimeout(() => child.kill("SIGKILL"), 1500).unref();
+      };
+
+      const inspectLog = () => {
+        try {
+          if (!existsSync(logFile)) return;
+          const text = readFileSync(logFile, "utf8");
+          if (networkErrorPattern.test(text)) networkError = true;
+          if (interactiveOAuthPattern.test(text)) {
+            authTriggered = true;
+            terminateChild();
+            return;
+          }
+          if (silentAuthSucceededPattern.test(text)) {
+            silentAuthStartedAt = null;
+          } else if (tryingSilentAuthPattern.test(text)) {
+            if (silentAuthStartedAt === null) silentAuthStartedAt = Date.now();
+            // Preempt agy's 10s keyringAuth timeout so it can never fall back to interactive OAuth.
+            if (Date.now() - silentAuthStartedAt >= silentAuthDeadlineMs) {
+              silentAuthTimedOut = true;
+              terminateChild();
+            }
+          }
+        } catch {
+          /* Log file may still be opening. */
+        }
+      };
+
+      const watcher = setInterval(inspectLog, 250);
+      watcher.unref();
+
       child.stdout.on("data", (d) => {
         if (stdout.length < 2_000_000) stdout += String(d);
       });
       child.stderr.on("data", (d) => {
         if (stderr.length < 4000) stderr += String(d);
+        if (interactiveOAuthPattern.test(stderr)) {
+          authTriggered = true;
+          terminateChild();
+        }
       });
+
       const timer = setTimeout(() => {
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), 2000).unref();
+        inspectLog();
+        terminateChild();
       }, timeoutMs);
-      child.on("error", (e) => {
+
+      const cleanup = () => {
         clearTimeout(timer);
+        clearInterval(watcher);
+        inspectLog();
+        try {
+          if (existsSync(logFile)) unlinkSync(logFile);
+        } catch {
+          /* Best-effort cleanup of ephemeral per-run log. */
+        }
+      };
+
+      child.on("error", (e) => {
+        cleanup();
         reject(e);
       });
       child.on("close", (code) => {
-        clearTimeout(timer);
-        resolve({ code, stdout, stderr });
+        cleanup();
+        if (networkErrorPattern.test(stderr)) networkError = true;
+        resolve({
+          code,
+          stdout,
+          stderr,
+          authTriggered,
+          silentAuthTimedOut,
+          networkError,
+        });
       });
     });
 }
@@ -227,12 +431,13 @@ export function cliCommand(
 export const nextBackoff = (previousMs: number | null) =>
   Math.min(900_000, previousMs ? previousMs * 2 : 60_000);
 
-const signedOutPattern =
-  /not logged in|please sign in|authenticate|login required|unauthenticated/i;
+/** Max consecutive non-offline CLI errors before automatically pausing to prevent any background loop. */
+export const maxConsecutiveFailures = 3;
 
 export class CliUsageReader {
   private backoffMs: number | null = null;
   private backoffUntil: number | null = null;
+  private consecutiveFailures = 0;
   private flight: Promise<boolean> | null = null;
   private stopped: string | null = null;
   private available = true;
@@ -243,7 +448,20 @@ export class CliUsageReader {
     private executable: string,
     private account: () => string,
     private enabled: () => boolean,
+    private preflight: NetworkPreflight = defaultNetworkPreflight,
   ) {}
+
+  private isAuthPaused(): boolean {
+    return this.store.get<boolean>("cliAuthPaused") === true;
+  }
+
+  /** Clear the pause circuit breaker (called when the user manually refreshes or re-enables CLI checks). */
+  resetPause() {
+    this.store.set("cliAuthPaused", false);
+    this.consecutiveFailures = 0;
+    this.backoffMs = null;
+    this.backoffUntil = null;
+  }
 
   state(now = Date.now()): CliReads {
     const saved = this.store.get<Partial<CliReads>>("cliReads") ?? {};
@@ -253,7 +471,9 @@ export class CliUsageReader {
         ? "unavailable"
         : this.stopped
           ? "stopped"
-          : ((saved.state as CliReadState) ?? "unavailable");
+          : this.isAuthPaused()
+            ? "signed-out"
+            : ((saved.state as CliReadState) ?? "unavailable");
     return {
       enabled: this.enabled(),
       available: this.available,
@@ -263,7 +483,9 @@ export class CliUsageReader {
       lastAttemptAt: saved.lastAttemptAt ?? null,
       lastError: this.stopped ?? saved.lastError ?? null,
       backoffUntil:
-        this.backoffUntil !== null && this.backoffUntil > now
+        !this.isAuthPaused() &&
+        this.backoffUntil !== null &&
+        this.backoffUntil > now
           ? this.backoffUntil
           : null,
       count: saved.count ?? 0,
@@ -278,28 +500,78 @@ export class CliUsageReader {
     });
   }
 
+  private pauseForAuth(now: number, error: string) {
+    this.store.set("cliAuthPaused", true);
+    this.consecutiveFailures = 0;
+    this.backoffMs = null;
+    this.backoffUntil = null;
+    this.save({ state: "signed-out", lastAttemptAt: now, lastError: error });
+    this.store.attempt({
+      at: now,
+      ok: false,
+      message: `CLI read paused: ${error}`,
+    });
+    return false;
+  }
+
   private fail(now: number, state: CliReadState, error: string) {
+    if (state !== "offline" && state !== "unavailable") {
+      this.consecutiveFailures++;
+      if (this.consecutiveFailures >= maxConsecutiveFailures) {
+        return this.pauseForAuth(
+          now,
+          `Paused after ${maxConsecutiveFailures} consecutive CLI failures (${error}). Click Refresh now to resume.`,
+        );
+      }
+    }
     this.backoffMs = nextBackoff(this.backoffMs);
     this.backoffUntil = now + this.backoffMs;
     this.save({ state, lastAttemptAt: now, lastError: error });
-    if (state !== "unavailable") {
+    if (state !== "unavailable" && state !== "offline") {
       this.store.attempt({ at: now, ok: false, message: `CLI read: ${error}` });
     }
     return false;
   }
 
-  read(now = Date.now()): Promise<boolean> {
+  /**
+   * One read, single-flight. Pass `manual = true` from an explicit user Refresh action
+   * to bypass backoff and clear the pause circuit breaker for one attempt.
+   */
+  read(now = Date.now(), manual = false): Promise<boolean> {
     if (this.flight) return this.flight;
-    this.flight = this.execute(now).finally(() => {
+    this.flight = this.execute(now, manual).finally(() => {
       this.flight = null;
     });
     return this.flight;
   }
 
-  private async execute(now: number): Promise<boolean> {
+  private async execute(now: number, manual: boolean): Promise<boolean> {
     if (!this.enabled() || this.stopped) return false;
-    if (this.backoffUntil !== null && this.backoffUntil > now) return false;
-    let result: Awaited<ReturnType<CliCommand>>;
+    if (manual) {
+      this.resetPause();
+    } else {
+      if (this.isAuthPaused()) return false;
+      if (this.backoffUntil !== null && this.backoffUntil > now) return false;
+    }
+
+    // Layer 1: Never launch `agy` while offline or DNS is broken.
+    const online = await this.preflight().catch(() => false);
+    if (!online) {
+      this.backoffMs = Math.min(
+        300_000,
+        this.backoffMs ? this.backoffMs * 2 : 60_000,
+      );
+      this.backoffUntil = now + this.backoffMs;
+      this.save({
+        state: "offline",
+        lastAttemptAt: now,
+        lastError:
+          "Offline or DNS unavailable — skipped agy check until network recovers",
+      });
+      return false;
+    }
+
+    let result: CliCommandResult;
     try {
       result = await this.run();
       this.available = true;
@@ -320,6 +592,27 @@ export class CliUsageReader {
         now,
         "error",
         `could not start Antigravity CLI (${(e as Error).message})`,
+      );
+    }
+
+    // Layer 3 & 4: Preemptive silent-auth timeout or explicit OAuth fallback -> trip circuit breaker immediately.
+    if (result.authTriggered) {
+      return this.pauseForAuth(
+        now,
+        "Antigravity sign-in needed; CLI checks paused to prevent browser popups. Run agy once, then click Refresh now.",
+      );
+    }
+    if (result.silentAuthTimedOut) {
+      if (result.networkError) {
+        return this.fail(
+          now,
+          "offline",
+          "Silent auth timed out due to network/DNS — stopped before interactive sign-in",
+        );
+      }
+      return this.pauseForAuth(
+        now,
+        "Silent auth timed out (stopped before browser sign-in could open). Check network/Keychain, then click Refresh now.",
       );
     }
 
@@ -344,12 +637,19 @@ export class CliUsageReader {
     }
 
     if (!reading) {
-      if (signedOutPattern.test(result.stderr))
+      if (result.networkError) {
         return this.fail(
           now,
-          "signed-out",
-          "Antigravity CLI is not signed in; run agy once in a terminal",
+          "offline",
+          "Network or DNS error while checking usage — waiting to reconnect",
         );
+      }
+      if (signedOutPattern.test(result.stderr)) {
+        return this.pauseForAuth(
+          now,
+          "Antigravity CLI is not signed in; CLI checks paused to prevent popups. Run agy once, then click Refresh now.",
+        );
+      }
       return this.fail(
         now,
         "error",
@@ -358,12 +658,19 @@ export class CliUsageReader {
     }
 
     if (!reading.available || !reading.windows.length) {
-      if (signedOutPattern.test(reading.text))
+      if (signedOutPattern.test(reading.text)) {
+        return this.pauseForAuth(
+          now,
+          "Antigravity CLI is not signed in; CLI checks paused to prevent popups. Run agy once, then click Refresh now.",
+        );
+      }
+      if (result.networkError) {
         return this.fail(
           now,
-          "signed-out",
-          "Antigravity CLI is not signed in; run agy once in a terminal",
+          "offline",
+          "Network or DNS timeout while fetching quota — waiting to reconnect",
         );
+      }
       return this.fail(
         now,
         "rate-limited",
@@ -373,6 +680,8 @@ export class CliUsageReader {
 
     const obs = cliObservations(reading, this.account(), now);
     for (const o of obs) this.store.observe(o);
+    this.store.set("cliAuthPaused", false);
+    this.consecutiveFailures = 0;
     this.backoffMs = null;
     this.backoffUntil = null;
     const saved = this.store.get<Partial<CliReads>>("cliReads") ?? {};

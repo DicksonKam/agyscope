@@ -7,16 +7,19 @@ import type { Store } from "./store.ts";
 
 export const tapParserVersion = 1;
 
-/** Round reset timestamps to the nearest whole minute to suppress fractional-second jitter. */
+/** Round reset timestamps to the nearest whole minute; ignore placeholder epoch-0 timestamps. */
 export function roundResetSeconds(value: unknown, nowMs: number): number | null {
   if (typeof value === "string") {
     const parsed = Date.parse(value);
-    if (Number.isFinite(parsed)) return Math.round(parsed / 60_000) * 60;
+    if (Number.isFinite(parsed) && parsed >= 1_577_836_800_000)
+      return Math.round(parsed / 60_000) * 60;
+    return null;
   }
   if (typeof value === "number" && Number.isFinite(value)) {
     const sec = value > 1e12 ? value / 1000 : value;
-    if (sec > 1_500_000_000) return Math.round(sec / 60) * 60;
-    if (sec >= 0) return Math.round((nowMs / 1000 + sec) / 60) * 60;
+    if (sec >= 1_577_836_800) return Math.round(sec / 60) * 60;
+    if (sec > 0 && sec < 100_000_000)
+      return Math.round((nowMs / 1000 + sec) / 60) * 60;
   }
   return null;
 }

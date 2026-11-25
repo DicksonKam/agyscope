@@ -39,6 +39,7 @@ export interface ActivityState {
 export type CliReadState =
   | "off"
   | "unavailable"
+  | "offline"
   | "ok"
   | "signed-out"
   | "rate-limited"

@@ -432,6 +432,8 @@ final class PanelModel: ObservableObject {
         guard let status else { return "Connecting to AGYScope…" }
         if status.demo == true { return "Synthetic demo · sample telemetry" }
         if !status.collector.enabled { return "Monitoring paused" }
+        if status.account?.cli?.state == "offline" { return "Offline or DNS unavailable · waiting to reconnect" }
+        if status.account?.cli?.state == "signed-out" { return "Sign-in needed · CLI checks paused to prevent popups" }
         if status.account?.creditsActive == true { return "AI Credits fallback active" }
         if status.isLive(at: now) { return "Live · Antigravity telemetry active" }
         if let read = status.latestReading {

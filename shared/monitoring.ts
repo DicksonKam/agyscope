@@ -30,10 +30,16 @@ export function monitoringHealth(
     };
   if (!collector.enabled) return { kind: "paused", label: "Monitoring paused" };
   if (cli?.enabled && cli.available) {
+    if (cli.state === "offline")
+      return {
+        kind: "idle",
+        label: "Offline or DNS unavailable · waiting to reconnect",
+      };
     if (cli.state === "signed-out")
       return {
         kind: "warning",
-        label: "CLI reads paused · Antigravity CLI is not signed in",
+        label:
+          "CLI checks paused · sign in with agy, then click Refresh now",
       };
     if (cli.state === "stopped")
       return {
