@@ -244,6 +244,40 @@ test("3 consecutive unknown CLI errors trip the universal circuit breaker, and c
   store.close();
 });
 
+test("a single silent-auth timeout (e.g. sleep/wake blip) auto-recovers instead of pausing permanently", async () => {
+  const store = new Store(":memory:");
+  let calls = 0;
+  const reader = new CliUsageReader(
+    store,
+    async () => {
+      calls++;
+      if (calls === 1) {
+        return { code: null, stdout: "", stderr: "", silentAuthTimedOut: true };
+      }
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          num_turns: 0,
+          usage: { total_tokens: 0 },
+          quota: { "gemini-5h": { remaining_fraction: 0.91 } },
+        }),
+        stderr: "",
+      };
+    },
+    "agy",
+    () => "acct",
+    () => true,
+    alwaysOnline,
+  );
+  assert.equal(await reader.read(1_000_000), false);
+  assert.equal(reader.state(1_000_000).state, "error");
+  // After 1-minute backoff, recovers automatically with no manual intervention
+  assert.equal(await reader.read(1_120_000), true);
+  assert.equal(calls, 2);
+  assert.equal(reader.state(1_120_000).state, "ok");
+  store.close();
+});
+
 test("no AGYScope source code reads credentials or contacts Google endpoints directly", () => {
   const root = join(import.meta.dirname, "..");
   for (const folder of ["server", "shared", "src", "macos", "scripts"]) {

@@ -322,7 +322,7 @@ export function cliCommand(
   cwd: string,
   logDir = cwd,
   timeoutMs = 22_000,
-  silentAuthDeadlineMs = 8_000,
+  silentAuthDeadlineMs = 8_500,
 ): CliCommand {
   return () =>
     new Promise((resolve, reject) => {
@@ -346,6 +346,7 @@ export function cliCommand(
       let networkError = false;
       let killed = false;
       let silentAuthStartedAt: number | null = null;
+      let lastTickAt = Date.now();
 
       const terminateChild = () => {
         if (killed) return;
@@ -355,6 +356,10 @@ export function cliCommand(
       };
 
       const inspectLog = () => {
+        const tickNow = Date.now();
+        // If macOS slept mid-check, wall-clock jumps sharply; treat as a clean offline/wake interruption.
+        if (tickNow - lastTickAt > 5_000) networkError = true;
+        lastTickAt = tickNow;
         try {
           if (!existsSync(logFile)) return;
           const text = readFileSync(logFile, "utf8");
@@ -367,9 +372,9 @@ export function cliCommand(
           if (silentAuthSucceededPattern.test(text)) {
             silentAuthStartedAt = null;
           } else if (tryingSilentAuthPattern.test(text)) {
-            if (silentAuthStartedAt === null) silentAuthStartedAt = Date.now();
+            if (silentAuthStartedAt === null) silentAuthStartedAt = tickNow;
             // Preempt agy's 10s keyringAuth timeout so it can never fall back to interactive OAuth.
-            if (Date.now() - silentAuthStartedAt >= silentAuthDeadlineMs) {
+            if (tickNow - silentAuthStartedAt >= silentAuthDeadlineMs) {
               silentAuthTimedOut = true;
               terminateChild();
             }
@@ -595,7 +600,8 @@ export class CliUsageReader {
       );
     }
 
-    // Layer 3 & 4: Preemptive silent-auth timeout or explicit OAuth fallback -> trip circuit breaker immediately.
+    // Layer 3 & 4: Explicit interactive OAuth fallback -> immediate permanent pause;
+    // preemptive silent-auth timeout (e.g. macOS sleep/wake blip) -> retry with backoff, pausing only after 3 strikes.
     if (result.authTriggered) {
       return this.pauseForAuth(
         now,
@@ -607,12 +613,13 @@ export class CliUsageReader {
         return this.fail(
           now,
           "offline",
-          "Silent auth timed out due to network/DNS — stopped before interactive sign-in",
+          "Silent auth interrupted by sleep or network — retrying automatically",
         );
       }
-      return this.pauseForAuth(
+      return this.fail(
         now,
-        "Silent auth timed out (stopped before browser sign-in could open). Check network/Keychain, then click Refresh now.",
+        "error",
+        "Silent auth timed out before browser sign-in could open — retrying",
       );
     }
 
